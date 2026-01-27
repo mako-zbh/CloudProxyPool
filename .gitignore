@@ -1,0 +1,33 @@
+# 编译产物
+*.exe~
+client/cloud-proxy
+
+# 证书文件
+client/certs/*.crt
+client/certs/*.key
+client/certs/*.pem
+
+# IDE 配置
+*.code-workspace
+.vscode/
+.idea/
+
+# 日志文件
+*.log
+traffic.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Go
+*.exe.bak
+*.test
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db

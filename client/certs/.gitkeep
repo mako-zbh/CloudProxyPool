@@ -1,0 +1,2 @@
+# 此目录用于存放自动生成的 CA 证书
+# 首次运行 cloud-proxy.exe 时会自动生成 ca.crt 和 ca.key

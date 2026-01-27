@@ -1,0 +1,11 @@
+[client]
+listen_addr = "127.0.0.1:10800"
+socks_addr = ":10801"
+dashboard_addr = ":8081"
+dump = false
+debug = false
+
+[cloud]
+# 由 deploy.py 自动生成
+function_urls = ["https://your-appid-xxxxxxxxxx.ap-shanghai.tencentscf.com", "https://your-appid-yyyyyyyyyy.ap-guangzhou.tencentscf.com"]
+region = "multi-region"
