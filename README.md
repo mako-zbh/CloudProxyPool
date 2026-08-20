@@ -10,11 +10,12 @@
 - 🌍 **多区域 IP 轮换** - 支持广州/上海/北京/成都等多个云函数节点
 - 🔐 **HTTPS 透明代理** - 内置 MITM 中间人攻击支持，一键生成自签 CA 证书
 - 🚀 **双协议支持** - HTTP 代理 (10800) + SOCKS5 代理 (10801)
-- 🔒 **身份认证** - 支持 HTTP Basic Auth 保护代理不被滥用
+- 🔒 **双重身份认证** - 本地代理支持 HTTP Basic Auth，云函数调用需携带鉴权 Token
+- 🛡️ **SSRF 防护** - 云函数拒绝访问内网/保留地址与云元数据服务
 - 💾 **流量录制** - 开启 `dump` 模式可将所有请求/响应写入日志
-- 🛡️ **智能熔断** - 自动检测并暂时屏蔽失败节点，提升稳定性
+- ⚡ **智能熔断** - 自动检测并暂时屏蔽失败节点，提升稳定性
 - 📊 **Web 监控面板** - 实时查看 QPS、成功率、节点健康状态 (http://127.0.0.1:8081)
-- ⚡ **一键部署** - 自动化脚本批量部署云函数到多个区域
+- 🚢 **一键部署** - 自动化脚本批量部署云函数到多个区域，自带状态轮询与失败自愈
 - 📸 **运行截图** - [查看项目运行预览](#-使用截图)
 
 ---
@@ -30,22 +31,22 @@
 ```
 CloudProxyPool/
 ├── client/                  # 客户端 (Go)
+│   ├── certs/              # 自动生成的 MITM CA 证书 (首次运行创建)
 │   ├── config/             # 配置解析
-│   ├── cloud/              # 云函数调用 + 熔断逻辑
+│   ├── cloud/              # 云函数调用 + Token 鉴权 + 熔断逻辑
 │   ├── proxy/              # HTTP/SOCKS5 代理核心
 │   ├── dashboard/          # Web 监控面板
-│   ├── main.go             # 入口文件
-│   ├── config.toml         # 配置文件
-│   └── cloud-proxy.exe     # 编译后的可执行文件
-├── server/                  # 云函数代码 (Python)
-│   ├── index.py            # 云函数入口
-│   └── requirements.txt    # Python 依赖
+│   └── main.go             # 入口文件
+├── server/                  # 云函数代码 (Python, 仅标准库)
+│   └── index.py            # 云函数入口
 ├── deploy/                  # 自动化部署工具
 │   ├── deploy.py           # 部署脚本
-│   ├── deploy.toml         # 部署配置
-│   └── requirements.txt    # Python 依赖
+│   ├── deploy.toml.example # 部署配置模板 (复制为 deploy.toml 并填入密钥)
+│   └── pyproject.toml      # Python 依赖 (uv)
 └── README.md               # 本文档
 ```
+
+> `deploy/deploy.toml` 与 `client/config.toml` 含密钥/Token，由部署脚本生成，已被 `.gitignore` 排除，**切勿提交到仓库**。
 
 ---
 
@@ -55,19 +56,21 @@ CloudProxyPool/
 
 ```bash
 cd deploy
-pip install -r requirements.txt
+cp deploy.toml.example deploy.toml
+# 编辑 deploy.toml，填入腾讯云 SecretId/SecretKey
 
-# 编辑 deploy.toml，填入腾讯云密钥
-python deploy.py
+uv run deploy.py
+# 或: pip install -r requirements.txt && python deploy.py
 ```
 
-部署成功后会自动输出所有 Function URLs 并写入 `../client/config.toml`。
+部署脚本会自动完成：打包服务端代码 → 创建/更新各区域函数（轮询等待就绪，`CreateFailed` 僵尸函数自动删除重建）→ 下发鉴权 Token → 配置函数 URL → 健康检查 → 生成 `client/config.toml`。
 
-### 2. 启动客户端
+### 2. 编译并启动客户端
 
 ```bash
 cd ../client
-./cloud-proxy.exe
+go build -o cloud-proxy .
+./cloud-proxy -C config.toml
 ```
 
 首次启动会自动生成 CA 证书到 `certs/` 目录。
@@ -95,25 +98,27 @@ curl -x socks5://127.0.0.1:10801 http://myip.ipip.net
 ### 4. 安装 CA 证书 (HTTPS 必需)
 
 **Windows:**
-1. 双击 `certs/ca-cert.pem`
+1. 双击 `certs/ca.crt`
 2. 点击"安装证书"
 3. 选择"受信任的根证书颁发机构"
 
 **Linux/Mac:**
 ```bash
 # Ubuntu/Debian
-sudo cp certs/ca-cert.pem /usr/local/share/ca-certificates/cloud-proxy-ca.crt
+sudo cp certs/ca.crt /usr/local/share/ca-certificates/cloud-proxy-ca.crt
 sudo update-ca-certificates
 
 # Mac
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain certs/ca-cert.pem
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain certs/ca.crt
 ```
+
+> Firefox 使用独立的证书库，需在 设置 → 隐私与安全 → 证书 中单独导入。
 
 ---
 
 ## ⚙️ 配置文件
 
-`client/config.toml` 示例：
+`client/config.toml` 示例（由 `deploy.py` 自动生成）：
 
 ```toml
 [client]
@@ -138,7 +143,39 @@ function_urls = [
     "https://your-appid-yyyy.ap-guangzhou.tencentscf.com"
 ]
 region = "multi-region"
+token = "部署时自动生成的鉴权 Token"   # 必须与 deploy.toml 中 auth_token 一致
 ```
+
+---
+
+## 🔐 安全机制
+
+**云函数鉴权 (Token)**
+
+函数 URL 是公网可达的。所有调用必须携带 `X-Auth-Token` 请求头且与函数环境变量 `AUTH_TOKEN` 匹配，否则返回 403。Token 在首次部署时自动生成，保存在三处并保持同步：
+
+- `deploy/deploy.toml` → `[security] auth_token`
+- `client/config.toml` → `[cloud] token`
+- 云函数环境变量 `AUTH_TOKEN`
+
+**轮换 Token**：修改 `deploy.toml` 中的 `auth_token` 后重跑 `uv run deploy.py`，客户端配置会同步更新。
+
+**SSRF 防护**
+
+云函数拒绝代理访问内网/保留地址（`127.0.0.0/8`、`169.254.0.0/16`、`10.0.0.0/8` 等）及云平台元数据服务，防止函数被当作内网探测跳板。
+
+**本地文件卫生**
+
+以下敏感文件已被 `.gitignore` 排除：`deploy/deploy.toml`（云 API 密钥）、`client/config.toml`（函数 URL + Token）、`client/certs/*.key`（MITM 私钥）。
+
+---
+
+## ⚠️ 已知限制
+
+- **云函数出口仅 IPv4**：IPv6 目标无法代理。客户端会在 SOCKS 握手阶段直接拒绝 IPv6 目标，应用（如微信）一般会自动回退到 IPv4 服务器。
+- **无状态请求转发**：每个请求对应一次独立的函数调用，不支持长连接/WebSocket。
+- **超时与大小限制**：上游请求超时 10 秒，单次响应大小受 SCF 响应限制（约 6MB）。
+- **账号依赖**：函数依赖腾讯云 CLS 日志服务（未开通会导致函数创建失败）。
 
 ---
 
@@ -186,7 +223,7 @@ dump_file = "traffic.log"
 
 ## 🔐 HTTP Basic Auth
 
-编辑 `config.toml` 启用认证：
+编辑 `config.toml` 启用本地代理认证：
 
 ```toml
 [client]
@@ -217,19 +254,31 @@ curl -x http://admin:your_strong_password@127.0.0.1:10800 http://ipinfo.io
 
 ### 1. HTTPS 提示证书错误
 
-➡️ 确保已安装 `certs/ca-cert.pem` 到系统受信任根证书
+➡️ 确保已安装 `certs/ca.crt` 到系统受信任根证书
 
 ### 2. 云函数调用失败
 
 ➡️ 检查 `config.toml` 中的 `function_urls` 是否正确  
 ➡️ 运行 `deploy.py` 重新部署并更新配置
 
-### 3. SOCKS5 无法连接
+### 3. 返回 403 Unauthorized
+
+➡️ `config.toml` 中的 `token` 与函数侧 Token 不一致，重跑 `deploy.py` 同步，或确认使用的是新版客户端（旧版不携带 Token）
+
+### 4. 部署报 `CreateFailed` / `CLS service is unregistered`
+
+➡️ 前腾讯云控制台开通日志服务 CLS，然后重跑 `deploy.py`（脚本会自动删除失败的僵尸函数并重建）
+
+### 5. 报 `Network is unreachable` 且目标为 IPv6 地址
+
+➡️ 云函数出口仅 IPv4，客户端已自动拒绝 IPv6 目标；若应用强制只走 IPv6，需在系统层面禁用 IPv6
+
+### 6. SOCKS5 无法连接
 
 ➡️ 确认 `config.toml` 中已配置 `socks_addr = ":10801"`  
 ➡️ 重启客户端
 
-### 4. Web 面板打不开
+### 7. Web 面板打不开
 
 ➡️ 确认 `dashboard_addr = ":8081"` 已配置  
 ➡️ 检查 8081 端口是否被占用
