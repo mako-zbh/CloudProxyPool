@@ -67,6 +67,16 @@ uv run deploy.py
 
 `deploy.toml` 中 `regions` 控制部署区域，`instance_count` 控制每个区域部署的实例数（同一区域多实例会获得不同的出口 IP，函数名自动加 `_1.._N` 后缀）。
 
+### 清理实例
+
+```bash
+uv run deploy.py clean                          # 清理配置文件中所有区域的实例
+uv run deploy.py clean ap-shanghai ap-beijing   # 清理指定区域的实例
+uv run deploy.py clean -y                       # 跳过删除确认
+```
+
+清理会删除区域内所有 `函数基础名` / `基础名_N` 的实例，删除前列出清单并要求确认。注意清理后 `client/config.toml` 仍指向旧 URL，需重新部署生成。
+
 ### 2. 编译并启动客户端
 
 ```bash

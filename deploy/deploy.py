@@ -1,9 +1,11 @@
 # -*- coding: utf8 -*-
 import os
+import re
 import sys
 import json
 import zipfile
 import time
+import argparse
 import requests
 import toml
 import base64
@@ -374,10 +376,94 @@ token = "{token}"
         f.write(config_content)
     print(f"\n[+] 客户端配置文件已生成: '{config_path}' (包含 {len(urls)} 个可用节点)")
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Cloud ProxyPool 自动化部署工具")
+    sub = parser.add_subparsers(dest="command")
+
+    clean_p = sub.add_parser("clean", help="清理已部署的函数实例")
+    clean_p.add_argument("regions", nargs="*",
+                         help="要清理的区域，如 ap-shanghai ap-beijing；不填则使用配置文件中的区域")
+    clean_p.add_argument("-y", "--yes", action="store_true", help="跳过删除确认")
+
+    return parser.parse_args()
+
+def list_pool_functions(client, namespace, base_name):
+    """列出区域内属于本代理池的函数 (基础名或 基础名_N)"""
+    pattern = re.compile(rf"{re.escape(base_name)}(_\d+)?$")
+    req = models.ListFunctionsRequest()
+    req.Namespace = namespace
+    req.SearchKey = base_name
+    req.Limit = 100
+    try:
+        resp = client.ListFunctions(req)
+    except Exception as e:
+        print(f"[错误] 列出函数失败: {e}")
+        return []
+    return [f.FunctionName for f in (resp.Functions or []) if pattern.fullmatch(f.FunctionName)]
+
+def cmd_clean(conf, args):
+    """清理函数实例: 删除指定区域(默认为配置区域)内所有 基础名/基础名_N 的函数"""
+    secret_id = conf['tencent']['secret_id']
+    secret_key = conf['tencent']['secret_key']
+    namespace = conf['deployment']['namespace']
+    base_name = conf['deployment']['function_name']
+    regions = args.regions or conf['deployment']['regions']
+
+    # 先收集所有区域的目标，统一展示后再删
+    plan = []
+    for region in regions:
+        client = get_client(region, secret_id, secret_key)
+        found = list_pool_functions(client, namespace, base_name)
+        if found:
+            plan.append((region, client, sorted(found)))
+        else:
+            print(f"[*] [{region}] 无匹配的函数实例")
+
+    if not plan:
+        print("[提示] 没有需要清理的实例。")
+        return
+
+    print("\n即将删除以下函数实例:")
+    for region, _, names in plan:
+        for name in names:
+            print(f"  - [{region}] {name}")
+
+    if not args.yes:
+        answer = input(f"\n确认删除以上 {sum(len(n) for _, _, n in plan)} 个函数? (y/N): ").strip().lower()
+        if answer != "y":
+            print("已取消。")
+            return
+
+    for region, client, names in plan:
+        for name in names:
+            req = models.DeleteFunctionRequest()
+            req.FunctionName = name
+            req.Namespace = namespace
+            try:
+                client.DeleteFunction(req)
+                print(f"[删除已提交] [{region}] {name}")
+            except TencentCloudSDKException as e:
+                print(f"[错误] [{region}] {name} 删除失败: {e}")
+
+    # 等待删除完成
+    for region, client, names in plan:
+        for name in names:
+            if not wait_function_deleted(client, name, namespace):
+                print(f"[警告] [{region}] {name} 删除等待超时，请稍后在控制台确认")
+
+    print("\n[完成] 清理结束。注意: client/config.toml 仍指向旧 URL，重新部署后会被覆盖生成。")
+
 def main():
+    args = parse_args()
+
     # 1. 加载配置
     print("=== Cloud ProxyPool 自动化部署工具 ===")
     conf = load_config()
+
+    if args.command == "clean":
+        cmd_clean(conf, args)
+        return
+
     secret_id = conf['tencent']['secret_id']
     secret_key = conf['tencent']['secret_key']
     
