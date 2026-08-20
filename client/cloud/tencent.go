@@ -76,9 +76,10 @@ type Provider struct {
 	Nodes        []*Node
 	CurrentIndex int
 	Client       *http.Client
+	Token        string // 云函数鉴权 Token，随每个请求以 X-Auth-Token 头发送
 }
 
-func NewProvider(functionURLs []string) *Provider {
+func NewProvider(functionURLs []string, token string) *Provider {
 	nodes := make([]*Node, len(functionURLs))
 	for i, url := range functionURLs {
 		nodes[i] = &Node{URL: url}
@@ -86,6 +87,7 @@ func NewProvider(functionURLs []string) *Provider {
 	return &Provider{
 		Nodes:        nodes,
 		CurrentIndex: 0,
+		Token:        token,
 		Client: &http.Client{
 			// 设置较长的超时时间以适应云函数冷启动或网络延迟 (90秒)
 			Timeout: 90 * time.Second,
@@ -169,6 +171,9 @@ func (p *Provider) invokeNode(node *Node, payload FunctionRequest) (*FunctionRes
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if p.Token != "" {
+		req.Header.Set("X-Auth-Token", p.Token)
+	}
 
 	resp, err := p.Client.Do(req)
 	if err != nil {

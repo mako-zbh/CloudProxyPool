@@ -22,13 +22,28 @@ def load_config():
         print(f"[错误] 找不到配置文件: {CONFIG_FILE}")
         print(f"[提示] 请先创建 {CONFIG_FILE} 并填入 SecretId/SecretKey")
         sys.exit(1)
-    
+
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return toml.load(f)
     except Exception as e:
         print(f"[错误] 解析配置文件失败: {e}")
         sys.exit(1)
+
+def get_auth_token(conf):
+    """获取鉴权 Token，不存在则自动生成并追加到配置文件"""
+    token = conf.get('security', {}).get('auth_token', '')
+    if token:
+        return token
+
+    import secrets
+    token = secrets.token_hex(16)
+    conf.setdefault('security', {})['auth_token'] = token
+    # 追加而非重写，保留原文件内容和注释
+    with open(CONFIG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"\n[security]\n# 云函数调用鉴权 Token (客户端 config.toml 中须填相同的 token)\nauth_token = \"{token}\"\n")
+    print(f"[+] 已自动生成鉴权 Token 并写入 {CONFIG_FILE}")
+    return token
 
 def create_zip(source_dir, output_filename):
     """打包服务端代码"""
@@ -49,7 +64,86 @@ def get_client(region, secret_id, secret_key):
     clientProfile.httpProfile = httpProfile
     return scf_client.ScfClient(cred, region, clientProfile)
 
-def deploy_function(client, region, zip_path, conf):
+def get_function_status(client, func_name, namespace):
+    """查询函数状态，返回 (Status, 失败原因)"""
+    req = models.GetFunctionRequest()
+    req.FunctionName = func_name
+    req.Namespace = namespace
+    resp = client.GetFunction(req)
+    return resp.Status, getattr(resp, "StatusReasons", None)
+
+def wait_function_active(client, region, func_name, namespace, timeout=180, interval=3):
+    """轮询等待函数进入 Active 状态。
+
+    CreateFunction/UpdateFunctionCode 返回成功只代表请求已受理，函数此时处于
+    Creating/Updating 状态，直接操作触发器会报:
+    FailedOperation: functionInfo Status is Creating, unsupport operate
+    """
+    deadline = time.time() + timeout
+    last_status = None
+    while time.time() < deadline:
+        try:
+            status, reasons = get_function_status(client, func_name, namespace)
+            last_status = status
+            if status == "Active":
+                return True
+            if "Failed" in status:  # CreatingFailed / UpdatingFailed 等终态
+                print(f"[错误] [{region}] 函数部署失败，状态: {status}, 原因: {reasons}")
+                return False
+        except TencentCloudSDKException:
+            pass  # 刚提交创建后立即查询可能偶发异常，下一轮重试
+        time.sleep(interval)
+    print(f"[错误] [{region}] 等待函数就绪超时({timeout}s)，最后状态: {last_status}")
+    return False
+
+def wait_function_deleted(client, func_name, namespace, timeout=120, interval=3):
+    """轮询等待函数删除完成（删除同样是异步操作）"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            get_function_status(client, func_name, namespace)
+        except TencentCloudSDKException as e:
+            if "ResourceNotFound" in str(e):
+                return True
+        time.sleep(interval)
+    return False
+
+def ensure_auth_env(client, region, func_name, namespace, token):
+    """确保函数环境变量中的 AUTH_TOKEN 与本地一致（不存在或不一致时更新配置）"""
+    req = models.GetFunctionRequest()
+    req.FunctionName = func_name
+    req.Namespace = namespace
+    resp = client.GetFunction(req)
+
+    current = ""
+    env = getattr(resp, "Env", None)
+    if env and env.Variables:
+        for v in env.Variables:
+            if v.Key == "AUTH_TOKEN":
+                current = v.Value
+    if current == token:
+        return True
+
+    print(f"[*] [{region}] 正在下发鉴权 Token...")
+    upd = models.UpdateFunctionConfigurationRequest()
+    upd.FunctionName = func_name
+    upd.Namespace = namespace
+    upd.Timeout = resp.Timeout
+    upd.MemorySize = resp.MemorySize
+    upd.Environment = models.Environment()
+    auth_var = models.Variable()
+    auth_var.Key = "AUTH_TOKEN"
+    auth_var.Value = token
+    upd.Environment.Variables = [auth_var]
+    try:
+        client.UpdateFunctionConfiguration(upd)
+    except Exception as e:
+        print(f"[错误] [{region}] 更新函数配置失败: {e}")
+        return False
+    # 更新配置同样会让函数进入 Updating 状态
+    return wait_function_active(client, region, func_name, namespace)
+
+def deploy_function(client, region, zip_path, conf, token):
     """部署或更新云函数"""
     func_name = conf['deployment']['function_name']
     namespace = conf['deployment']['namespace']
@@ -77,7 +171,29 @@ def deploy_function(client, region, zip_path, conf):
     base64_code = base64.b64encode(code_content).decode('utf-8')
 
     if exists:
-        print(f"[*] [{region}] 函数已存在，正在更新代码...")
+        status, _ = get_function_status(client, func_name, namespace)
+        if status == "CreateFailed":
+            # 函数从未创建成功(如账号未开通 CLS 导致)，属于僵尸函数，删除后走重建流程
+            print(f"[*] [{region}] 函数处于 CreateFailed 状态，删除后重建...")
+            del_req = models.DeleteFunctionRequest()
+            del_req.FunctionName = func_name
+            del_req.Namespace = namespace
+            try:
+                client.DeleteFunction(del_req)
+            except TencentCloudSDKException as e:
+                print(f"[错误] [{region}] 删除失败状态的函数出错: {e}")
+                return False
+            if not wait_function_deleted(client, func_name, namespace):
+                print(f"[错误] [{region}] 等待函数删除超时")
+                return False
+            exists = False
+        else:
+            print(f"[*] [{region}] 函数已存在，正在更新代码...")
+            # 上次运行中断可能让函数停留在 Creating/Updating 状态，先等它就绪再更新
+            if not wait_function_active(client, region, func_name, namespace):
+                return False
+
+    if exists:
         req = models.UpdateFunctionCodeRequest()
         req.FunctionName = func_name
         req.Namespace = namespace
@@ -98,15 +214,23 @@ def deploy_function(client, region, zip_path, conf):
         req.Runtime = runtime
         req.Namespace = namespace
         req.Timeout = conf['deployment'].get('time_out', 60)
+        req.Environment = models.Environment()
+        auth_var = models.Variable()
+        auth_var.Key = "AUTH_TOKEN"
+        auth_var.Value = token
+        req.Environment.Variables = [auth_var]
         try:
             client.CreateFunction(req)
         except Exception as e:
             print(f"[错误] [{region}] 创建函数失败: {e}")
             return False
-    
-    # 等待状态同步
-    time.sleep(2)
-    return True
+
+    # 创建/更新代码都是异步操作，必须等函数回到 Active 才能配置触发器
+    if not wait_function_active(client, region, func_name, namespace):
+        return False
+
+    # 更新路径的函数没有新环境变量，这里统一确保鉴权 Token 已下发
+    return ensure_auth_env(client, region, func_name, namespace, token)
 
 def enable_function_url(client, region, conf):
     """启用并获取函数 URL (通过创建 HTTP Trigger)"""
@@ -184,22 +308,23 @@ def enable_function_url(client, region, conf):
         print(f"[错误] [{region}] 获取函数 URL 失败: {err}")
         return None
 
-def check_health(url, conf):
+def check_health(url, conf, token):
     """对部署好的 URL 进行健康检查"""
     test_url = conf['health_check']['test_url']
     expected_status = conf['health_check']['expected_status']
-    
+
     print(f"[*] [健康检查] 正在测试代理: {url} -> {test_url}")
-    
+
     payload = {
         "method": "GET",
         "url": test_url,
         "headers": {"User-Agent": "Deploy-HealthCheck"},
         "body": ""
     }
-    
+
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, timeout=15,
+                             headers={"X-Auth-Token": token} if token else {})
         if resp.status_code == 200:
             # 解析代理返回的包
             data = resp.json()
@@ -221,7 +346,7 @@ def check_health(url, conf):
         
     return False
 
-def generate_client_config(urls):
+def generate_client_config(urls, token):
     """生成客户端配置文件"""
     config_content = f"""[client]
 listen_addr = "127.0.0.1:10800"
@@ -239,6 +364,7 @@ debug = false
 # 由 deploy.py 自动生成
 function_urls = {json.dumps(urls)}
 region = "multi-region"
+token = "{token}"
 """
     
     # 生成到 ../client/config.toml
@@ -261,7 +387,10 @@ def main():
         print("[提示] 请先修改 configuration file 中的密钥信息！")
         sys.exit(1)
 
-    # 2. 打包
+    # 2. 获取/生成鉴权 Token
+    token = get_auth_token(conf)
+
+    # 3. 打包
     base_dir = os.path.dirname(os.path.abspath(__file__))
     server_dir = os.path.join(os.path.dirname(base_dir), "server")
     zip_path = "deploy_package.zip"
@@ -270,20 +399,20 @@ def main():
     success_urls = []
     regions = conf['deployment']['regions']
 
-    # 3. 遍历部署
+    # 4. 遍历部署
     print(f"\n[+] 开始部署，共 {len(regions)} 个区域: {regions}")
     for region in regions:
         print(f"\n>>> 处理区域: {region}")
         try:
             client = get_client(region, secret_id, secret_key)
-            if deploy_function(client, region, zip_path, conf):
+            if deploy_function(client, region, zip_path, conf, token):
                 url = enable_function_url(client, region, conf)
                 if url:
                     print(f"[+] [{region}] URL 获取成功: {url}")
-                    
-                    # 4. 健康检查
+
+                    # 5. 健康检查
                     if conf['health_check']['enable']:
-                        if check_health(url, conf):
+                        if check_health(url, conf, token):
                             success_urls.append(url)
                         else:
                             print(f"[!] [{region}] 部署成功但健康检查失败，暂不加入配置。")
@@ -292,12 +421,12 @@ def main():
         except Exception as e:
             print(f"[-] [{region}] 部署流程发生异常: {e}")
 
-    # 5. 清理与生成配置
+    # 6. 清理与生成配置
     if os.path.exists(zip_path):
         os.remove(zip_path)
 
     if success_urls:
-        generate_client_config(success_urls)
+        generate_client_config(success_urls, token)
         print("\n=== 部署完成! ===")
         print("您可以直接运行客户端开始使用: ./cloud-proxy.exe -C config.toml")
     else:

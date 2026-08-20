@@ -135,7 +135,14 @@ func (s *ProxyServer) startSocks5Proxy() {
 			// 策略路由：
 			// 1. 如果是 HTTP (端口 80, 8080)，使用内部透明管道 (避免 MITM 强制 TLS)
 			// 2. 如果是 HTTPS (端口 443)，使用 CONNECT 桥接到本地代理
-			_, port, _ := net.SplitHostPort(addr)
+			host, port, _ := net.SplitHostPort(addr)
+
+			// 云函数出口网络仅有 IPv4，IPv6 目标 (如微信 mmtls 的 240e: 地址) 必然失败；
+			// 在 SOCKS 握手阶段直接拒绝，让应用立即回退到 IPv4 服务器，
+			// 避免连接"假成功"后中途收到 502 破坏上层协议
+			if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+				return nil, fmt.Errorf("IPv6 目标不支持 (云函数出口仅 IPv4): %s", addr)
+			}
 
 			if port == "80" || port == "8080" {
 				// 创建内存管道
@@ -233,6 +240,15 @@ func (s *ProxyServer) handleSocksHTTP(conn net.Conn, targetAddr string) {
 func (s *ProxyServer) handleRequest(r *http.Request) *http.Response {
 	// Stat: Total ++
 	atomic.AddUint64(&s.TotalRequests, 1)
+
+	// 云函数出口仅有 IPv4，IPv6 字面量目标直接失败，不浪费函数调用
+	if host := r.URL.Hostname(); host != "" {
+		if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+			atomic.AddUint64(&s.FailedRequests, 1)
+			return goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusBadGateway,
+				"Cloud Proxy: IPv6 target not supported (function egress is IPv4-only): "+host)
+		}
+	}
 
 	startTime := time.Now()
 

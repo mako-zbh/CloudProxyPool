@@ -1,6 +1,11 @@
 # 编译产物
 *.exe~
-client/cloud-proxy
+client/cloud-proxy*
+
+# 敏感配置 (含腾讯云密钥 / 鉴权 Token / 函数 URL)
+deploy/deploy.toml
+client/config.toml
+deploy/deploy_package.zip
 
 # 证书文件
 client/certs/*.crt

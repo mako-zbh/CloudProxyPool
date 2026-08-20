@@ -39,7 +39,7 @@ func main() {
 	}
 
 	// 2. 初始化云函数提供者
-	provider := cloud.NewProvider(conf.Cloud.FunctionURLs)
+	provider := cloud.NewProvider(conf.Cloud.FunctionURLs, conf.Cloud.Token)
 
 	// 3. 健康检查
 	color.Cyan("正在执行健康检查 (Health Check)...")

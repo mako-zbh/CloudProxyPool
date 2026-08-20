@@ -12,6 +12,10 @@ namespace = "default"
 runtime = "Python3.9"
 time_out = 60
 
+[security]
+# 云函数调用鉴权 Token (留空则首次部署时自动生成并回写到 deploy.toml)
+auth_token = ""
+
 [health_check]
 # 是否部署后立即进行健康检查
 enable = true
