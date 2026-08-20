@@ -143,9 +143,8 @@ def ensure_auth_env(client, region, func_name, namespace, token):
     # 更新配置同样会让函数进入 Updating 状态
     return wait_function_active(client, region, func_name, namespace)
 
-def deploy_function(client, region, zip_path, conf, token):
+def deploy_function(client, region, func_name, zip_path, conf, token):
     """部署或更新云函数"""
-    func_name = conf['deployment']['function_name']
     namespace = conf['deployment']['namespace']
     handler = "index.main_handler"
     runtime = conf['deployment']['runtime']
@@ -232,9 +231,8 @@ def deploy_function(client, region, zip_path, conf, token):
     # 更新路径的函数没有新环境变量，这里统一确保鉴权 Token 已下发
     return ensure_auth_env(client, region, func_name, namespace, token)
 
-def enable_function_url(client, region, conf):
+def enable_function_url(client, region, func_name, conf):
     """启用并获取函数 URL (通过创建 HTTP Trigger)"""
-    func_name = conf['deployment']['function_name']
     namespace = conf['deployment']['namespace']
     
     print(f"[*] [{region}] 正在配置函数 URL...")
@@ -399,27 +397,37 @@ def main():
     success_urls = []
     regions = conf['deployment']['regions']
 
-    # 4. 遍历部署
-    print(f"\n[+] 开始部署，共 {len(regions)} 个区域: {regions}")
+    # 4. 遍历部署 (每个区域可部署多个实例，函数名加 _N 后缀)
+    base_name = conf['deployment']['function_name']
+    instance_count = conf['deployment'].get('instance_count', 1)
+    print(f"\n[+] 开始部署，共 {len(regions)} 个区域 x {instance_count} 个实例/区域")
+
     for region in regions:
-        print(f"\n>>> 处理区域: {region}")
         try:
             client = get_client(region, secret_id, secret_key)
-            if deploy_function(client, region, zip_path, conf, token):
-                url = enable_function_url(client, region, conf)
-                if url:
-                    print(f"[+] [{region}] URL 获取成功: {url}")
-
-                    # 5. 健康检查
-                    if conf['health_check']['enable']:
-                        if check_health(url, conf, token):
-                            success_urls.append(url)
-                        else:
-                            print(f"[!] [{region}] 部署成功但健康检查失败，暂不加入配置。")
-                    else:
-                        success_urls.append(url)
         except Exception as e:
-            print(f"[-] [{region}] 部署流程发生异常: {e}")
+            print(f"[-] [{region}] 初始化客户端失败: {e}")
+            continue
+
+        for idx in range(1, instance_count + 1):
+            func_name = base_name if instance_count == 1 else f"{base_name}_{idx}"
+            print(f"\n>>> 处理: [{region}] {func_name}")
+            try:
+                if deploy_function(client, region, func_name, zip_path, conf, token):
+                    url = enable_function_url(client, region, func_name, conf)
+                    if url:
+                        print(f"[+] [{region}] URL 获取成功: {url}")
+
+                        # 5. 健康检查
+                        if conf['health_check']['enable']:
+                            if check_health(url, conf, token):
+                                success_urls.append(url)
+                            else:
+                                print(f"[!] [{region}] {func_name} 部署成功但健康检查失败，暂不加入配置。")
+                        else:
+                            success_urls.append(url)
+            except Exception as e:
+                print(f"[-] [{region}] {func_name} 部署流程发生异常: {e}")
 
     # 6. 清理与生成配置
     if os.path.exists(zip_path):

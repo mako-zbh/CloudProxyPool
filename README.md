@@ -65,6 +65,8 @@ uv run deploy.py
 
 部署脚本会自动完成：打包服务端代码 → 创建/更新各区域函数（轮询等待就绪，`CreateFailed` 僵尸函数自动删除重建）→ 下发鉴权 Token → 配置函数 URL → 健康检查 → 生成 `client/config.toml`。
 
+`deploy.toml` 中 `regions` 控制部署区域，`instance_count` 控制每个区域部署的实例数（同一区域多实例会获得不同的出口 IP，函数名自动加 `_1.._N` 后缀）。
+
 ### 2. 编译并启动客户端
 
 ```bash

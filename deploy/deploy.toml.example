@@ -6,6 +6,8 @@ secret_key = "**********************"    # 在腾讯云控制台获取
 [deployment]
 # 部署区域列表
 regions = ["ap-shanghai", "ap-guangzhou", "ap-beijing", "ap-chengdu"]
+# 每个区域部署的函数实例数 (函数名自动加 _1.._N 后缀)
+instance_count = 1
 # 函数配置
 function_name = "cloud_proxy_pool_func"
 namespace = "default"
