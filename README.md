@@ -293,6 +293,7 @@ MIT License
 
 ## 🙏 致谢
 
+- [25smoking/CloudProxyPool](https://github.com/25smoking/CloudProxyPool) - 本项目基于其 fork 而来
 - [goproxy](https://github.com/elazarl/goproxy) - HTTP 代理核心
 - [go-socks5](https://github.com/armon/go-socks5) - SOCKS5 协议实现
 - 腾讯云函数 (SCF) - 无服务器计算平台
