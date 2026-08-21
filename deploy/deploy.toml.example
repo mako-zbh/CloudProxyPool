@@ -17,6 +17,8 @@ time_out = 60
 [security]
 # 云函数调用鉴权 Token (留空则首次部署时自动生成并回写到 deploy.toml)
 auth_token = ""
+# SSRF 防护: true 拒绝内网/保留地址; false 放行 (漏洞探测场景建议 false, 云元数据始终拦截)
+ssrf_protection = true
 
 [health_check]
 # 是否部署后立即进行健康检查

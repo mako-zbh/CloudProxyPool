@@ -12,6 +12,13 @@ import ssl
 # 鉴权 Token，由部署脚本通过环境变量下发；为空表示未启用鉴权
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
 
+# SSRF 防护开关 (on/off)，由部署脚本下发；关闭后放行内网/保留地址，
+# 但云平台元数据服务始终拦截，防止函数被用于窃取云凭证
+SSRF_PROTECT = os.environ.get("SSRF_PROTECT", "on").lower() != "off"
+
+# 云元数据服务地址 (无论开关状态一律拒绝)
+METADATA_HOSTS = {"metadata.tencentyun.com", "169.254.0.23", "169.254.169.254"}
+
 def main_handler(event, context):
     """
     Tencent Cloud SCF Main Handler via Function URL
@@ -89,10 +96,14 @@ def main_handler(event, context):
         return mk_response(500, {"error": f"Internal Server Error: {str(e)}"})
 
 def is_blocked_host(host):
-    """内网/保留地址一律拒绝，防止函数被用来探测内网或云元数据"""
+    """云元数据一律拒绝；SSRF 防护开启时再拒绝内网/保留地址"""
     if not host:
         return True
-    if host in ("localhost", "metadata.tencentyun.com"):
+    if host in METADATA_HOSTS:
+        return True
+    if not SSRF_PROTECT:
+        return False
+    if host == "localhost":
         return True
     try:
         ip = ipaddress.ip_address(host)

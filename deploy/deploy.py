@@ -110,33 +110,41 @@ def wait_function_deleted(client, func_name, namespace, timeout=120, interval=3)
         time.sleep(interval)
     return False
 
-def ensure_auth_env(client, region, func_name, namespace, token):
-    """确保函数环境变量中的 AUTH_TOKEN 与本地一致（不存在或不一致时更新配置）"""
+def build_env_vars(conf, token):
+    """构造函数环境变量: 鉴权 Token + SSRF 防护开关"""
+    ssrf_on = conf.get('security', {}).get('ssrf_protection', True)
+    env_auth = models.Variable()
+    env_auth.Key = "AUTH_TOKEN"
+    env_auth.Value = token
+    env_ssrf = models.Variable()
+    env_ssrf.Key = "SSRF_PROTECT"
+    env_ssrf.Value = "off" if ssrf_on is False else "on"
+    return [env_auth, env_ssrf]
+
+def ensure_function_env(client, region, func_name, namespace, conf, token):
+    """确保函数环境变量与本地配置一致（不存在或不一致时更新配置）"""
     req = models.GetFunctionRequest()
     req.FunctionName = func_name
     req.Namespace = namespace
     resp = client.GetFunction(req)
 
-    current = ""
+    current = {}
     env = getattr(resp, "Env", None)
     if env and env.Variables:
         for v in env.Variables:
-            if v.Key == "AUTH_TOKEN":
-                current = v.Value
-    if current == token:
+            current[v.Key] = v.Value
+    desired = {v.Key: v.Value for v in build_env_vars(conf, token)}
+    if all(current.get(k) == val for k, val in desired.items()):
         return True
 
-    print(f"[*] [{region}] 正在下发鉴权 Token...")
+    print(f"[*] [{region}] 正在下发函数环境变量 (Token/SSRF 开关)...")
     upd = models.UpdateFunctionConfigurationRequest()
     upd.FunctionName = func_name
     upd.Namespace = namespace
     upd.Timeout = resp.Timeout
     upd.MemorySize = resp.MemorySize
     upd.Environment = models.Environment()
-    auth_var = models.Variable()
-    auth_var.Key = "AUTH_TOKEN"
-    auth_var.Value = token
-    upd.Environment.Variables = [auth_var]
+    upd.Environment.Variables = build_env_vars(conf, token)
     try:
         client.UpdateFunctionConfiguration(upd)
     except Exception as e:
@@ -216,10 +224,7 @@ def deploy_function(client, region, func_name, zip_path, conf, token):
         req.Namespace = namespace
         req.Timeout = conf['deployment'].get('time_out', 60)
         req.Environment = models.Environment()
-        auth_var = models.Variable()
-        auth_var.Key = "AUTH_TOKEN"
-        auth_var.Value = token
-        req.Environment.Variables = [auth_var]
+        req.Environment.Variables = build_env_vars(conf, token)
         try:
             client.CreateFunction(req)
         except Exception as e:
@@ -230,8 +235,8 @@ def deploy_function(client, region, func_name, zip_path, conf, token):
     if not wait_function_active(client, region, func_name, namespace):
         return False
 
-    # 更新路径的函数没有新环境变量，这里统一确保鉴权 Token 已下发
-    return ensure_auth_env(client, region, func_name, namespace, token)
+    # 更新路径的函数没有新环境变量，这里统一确保 Token/SSRF 开关已下发
+    return ensure_function_env(client, region, func_name, namespace, conf, token)
 
 def enable_function_url(client, region, func_name, conf):
     """启用并获取函数 URL (通过创建 HTTP Trigger)"""
