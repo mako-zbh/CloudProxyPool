@@ -183,10 +183,18 @@ func (p *Provider) invokeNode(node *Node, payload FunctionRequest) (*FunctionRes
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		node.MarkFailure()
 		body, _ := ioutil.ReadAll(resp.Body)
-		// 只有 5xx 错误才算节点故障？ 4xx 可能是用户请求本身的问题
-		// 这里暂且认为所有非200都是调用失败，或者可以细化
+		// 函数按自身协议返回的 JSON 错误 ({"error": "..."}) 说明函数执行正常，
+		// 只是上游目标不可达/请求被拒——不计入节点熔断，否则批量扫描死目标会
+		// 把健康节点全部误熔断；平台层错误 (网关/限流，非 JSON 响应) 才算节点故障
+		var funcErr struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(body, &funcErr); err == nil && funcErr.Error != "" {
+			node.MarkSuccess()
+			return nil, fmt.Errorf("目标请求失败(非节点故障): %s", funcErr.Error)
+		}
+		node.MarkFailure()
 		return nil, fmt.Errorf("云函数调用失败: %s | 响应体: %s", resp.Status, string(body))
 	}
 
