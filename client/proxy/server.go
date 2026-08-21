@@ -173,21 +173,30 @@ func (s *ProxyServer) startSocks5Proxy() {
 				return nil, fmt.Errorf("发送 HTTP CONNECT 失败: %v", err)
 			}
 
-			// 读取响应
+			// 读取响应（循环读到响应头结束，避免分包漏读）
 			buf := make([]byte, 1024)
-			n, err := proxyConn.Read(buf)
-			if err != nil {
-				proxyConn.Close()
-				return nil, fmt.Errorf("读取 HTTP 代理握手响应失败: %v", err)
+			var respHead []byte
+			for {
+				n, err := proxyConn.Read(buf)
+				if n > 0 {
+					respHead = append(respHead, buf[:n]...)
+					if bytes.Contains(respHead, []byte("\r\n\r\n")) {
+						break
+					}
+				}
+				if err != nil {
+					proxyConn.Close()
+					return nil, fmt.Errorf("读取 HTTP 代理握手响应失败: %v", err)
+				}
 			}
 
-			resp := string(buf[:n])
-			if n >= 12 && (resp[:12] == "HTTP/1.1 200" || resp[:10] == "HTTP/1.0 200") {
+			// goproxy 对 CONNECT 应答 "HTTP/1.0 200 OK"，按前缀判断状态行
+			if bytes.HasPrefix(respHead, []byte("HTTP/1.1 200")) || bytes.HasPrefix(respHead, []byte("HTTP/1.0 200")) {
 				return proxyConn, nil
 			}
 
 			proxyConn.Close()
-			return nil, fmt.Errorf("HTTP 代理握手被拒绝: %s", resp)
+			return nil, fmt.Errorf("HTTP 代理握手被拒绝: %s", respHead)
 		},
 		Logger: log.New(ioutil.Discard, "", 0),
 	}
