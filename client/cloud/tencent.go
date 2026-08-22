@@ -77,6 +77,7 @@ type Provider struct {
 	CurrentIndex int
 	Client       *http.Client
 	Token        string // 云函数鉴权 Token，随每个请求以 X-Auth-Token 头发送
+	mu           sync.Mutex // 保护 CurrentIndex，保证高并发下严格轮询不偏斜
 }
 
 func NewProvider(functionURLs []string, token string) *Provider {
@@ -100,6 +101,10 @@ func (p *Provider) getNextNode() *Node {
 	if len(p.Nodes) == 0 {
 		return nil
 	}
+
+	// 加锁保证游标的读-选-写是原子的，并发请求严格逐个轮流
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	startIdx := p.CurrentIndex
 	for i := 0; i < len(p.Nodes); i++ {

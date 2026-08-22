@@ -359,6 +359,8 @@ socks_addr = ":10801"
 dashboard_addr = ":8081"
 dump = false
 debug = false
+# 静默模式: 关闭逐请求日志，只输出错误和每分钟统计 (高并发扫描建议开启)
+quiet = true
 
 # 可选配置 (取消注释以启用):
 # user = "admin"

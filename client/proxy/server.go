@@ -34,6 +34,7 @@ type ProxyServer struct {
 	DumpFile  string
 	Provider  *cloud.Provider
 	Verbose   bool
+	Quiet     bool // 静默模式: 关闭逐请求日志，只输出错误和周期统计
 	dumpMu    sync.Mutex
 
 	// Stats (Atomic)
@@ -52,7 +53,7 @@ func (s *ProxyServer) GetStats() dashboard.ProxyStats {
 	}
 }
 
-func NewProxyServer(addr, socksAddr, user, password string, dump bool, dumpFile string, provider *cloud.Provider, verbose bool) *ProxyServer {
+func NewProxyServer(addr, socksAddr, user, password string, dump bool, dumpFile string, provider *cloud.Provider, verbose, quiet bool) *ProxyServer {
 	if dumpFile == "" {
 		dumpFile = "traffic.log"
 	}
@@ -65,6 +66,7 @@ func NewProxyServer(addr, socksAddr, user, password string, dump bool, dumpFile 
 		DumpFile:  dumpFile,
 		Provider:  provider,
 		Verbose:   verbose,
+		Quiet:     quiet,
 	}
 }
 
@@ -88,8 +90,31 @@ func (s *ProxyServer) Start() error {
 		go s.startSocks5Proxy()
 	}
 
+	// 3. 静默模式下周期输出运行统计
+	if s.Quiet {
+		go s.statsReporter()
+	}
+
 	// 阻塞主 Goroutine 防止退出
 	select {}
+}
+
+// statsReporter 静默模式下每分钟输出一次累计统计 (仅在有新请求时)
+func (s *ProxyServer) statsReporter() {
+	var lastTotal, lastSuccess, lastFailed uint64
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		total := atomic.LoadUint64(&s.TotalRequests)
+		if total == lastTotal {
+			continue
+		}
+		success := atomic.LoadUint64(&s.SuccessRequests)
+		failed := atomic.LoadUint64(&s.FailedRequests)
+		fmt.Printf("[统计] 累计 %d 请求 | 本分钟 +%d (成功 +%d / 失败 +%d)\n",
+			total, total-lastTotal, success-lastSuccess, failed-lastFailed)
+		lastTotal, lastSuccess, lastFailed = total, success, failed
+	}
 }
 
 func (s *ProxyServer) startHTTPProxy() {
@@ -303,8 +328,10 @@ func (s *ProxyServer) handleRequest(r *http.Request) *http.Response {
 		// Stat: Failed ++
 		atomic.AddUint64(&s.FailedRequests, 1)
 
-		fmt.Printf("[%s] %s %s -> 错误 (%v)\n",
-			startTime.Format("15:04:05"), r.Method, r.URL.Host, duration)
+		if !s.Quiet {
+			fmt.Printf("[%s] %s %s -> 错误 (%v)\n",
+				startTime.Format("15:04:05"), r.Method, r.URL.Host, duration)
+		}
 		log.Printf("[错误] 调用云函数失败 %s: %v", r.URL, err)
 
 		if s.Dump {
@@ -316,20 +343,22 @@ func (s *ProxyServer) handleRequest(r *http.Request) *http.Response {
 	// Stat: Success ++
 	atomic.AddUint64(&s.SuccessRequests, 1)
 
-	// 日志输出
-	statusColor := color.New(color.FgGreen).SprintFunc()
-	if funcResp.StatusCode >= 400 {
-		statusColor = color.New(color.FgRed).SprintFunc()
-	} else if funcResp.StatusCode >= 300 {
-		statusColor = color.New(color.FgYellow).SprintFunc()
-	}
+	// 日志输出 (静默模式下跳过)
+	if !s.Quiet {
+		statusColor := color.New(color.FgGreen).SprintFunc()
+		if funcResp.StatusCode >= 400 {
+			statusColor = color.New(color.FgRed).SprintFunc()
+		} else if funcResp.StatusCode >= 300 {
+			statusColor = color.New(color.FgYellow).SprintFunc()
+		}
 
-	fmt.Printf("[%s] %s %s -> %s (%v)\n",
-		startTime.Format("15:04:05"),
-		r.Method,
-		r.URL.Host,
-		statusColor(fmt.Sprintf("%d", funcResp.StatusCode)),
-		duration.Round(time.Millisecond))
+		fmt.Printf("[%s] %s %s -> %s (%v)\n",
+			startTime.Format("15:04:05"),
+			r.Method,
+			r.URL.Host,
+			statusColor(fmt.Sprintf("%d", funcResp.StatusCode)),
+			duration.Round(time.Millisecond))
+	}
 
 	// 解码响应
 	var respBody []byte

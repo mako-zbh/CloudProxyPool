@@ -20,6 +20,7 @@ type ClientConfig struct {
 	DumpFile      string `toml:"dump_file"`      // [可选] 流量录制文件路径 (默认 "traffic.log")
 	DashboardAddr string `toml:"dashboard_addr"` // [可选] 监控面板监听地址 (此字段需手动添加至 toml)
 	Debug         bool   `toml:"debug"`          // 是否开启调试日志
+	Quiet         bool   `toml:"quiet"`          // [可选] 静默模式: 关闭逐请求日志，只输出错误和周期统计
 }
 
 type CloudConfig struct {

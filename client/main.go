@@ -64,6 +64,7 @@ func main() {
 		conf.Client.DumpFile,
 		provider,
 		conf.Client.Debug,
+		conf.Client.Quiet,
 	)
 
 	// 6. 启动 Web Dashboard (如果配置)
@@ -89,6 +90,11 @@ func showBanner(conf *config.Config, ip string) {
 	fmt.Println("================================================================")
 	color.Green(" [客户端] 监听地址  : %s", conf.Client.ListenAddr)
 	color.Green(" [云函数] 加载节点数: %d 个 Function URL", len(conf.Cloud.FunctionURLs))
+	logMode := "详细 (逐请求输出)"
+	if conf.Client.Quiet {
+		logMode = "静默 (仅错误 + 每分钟统计)"
+	}
+	color.Green(" [日志  ] 输出模式  : %s", logMode)
 	color.Green(" [状  态] 健康检查  : 通过 (PASS)")
 	color.Green(" [云  端] 当前出口IP: %s (随请求自动轮换)", ip)
 	fmt.Println("================================================================")
