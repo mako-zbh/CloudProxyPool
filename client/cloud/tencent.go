@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,14 +32,18 @@ type FunctionResponse struct {
 
 // Node Represents a cloud function node with health status
 type Node struct {
-	URL          string
-	FailureCount int
-	LastFailTime time.Time
-	mu           sync.RWMutex
+	Name          string
+	URL           string
+	FailureCount  int // 连续失败次数 (熔断判定用)
+	LastFailTime  time.Time
+	Requests      uint64 // 累计承接请求数 (atomic)
+	FailTotal     uint64 // 累计平台级失败次数 (atomic)
+	mu            sync.RWMutex
 }
 
 // MarkFailure records a failure for the node
 func (n *Node) MarkFailure() {
+	atomic.AddUint64(&n.FailTotal, 1)
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.FailureCount++
@@ -72,6 +77,21 @@ func (n *Node) IsHealthy() bool {
 	return true
 }
 
+// Stats 返回节点运行统计 (并发安全): 承接数、累计平台级失败、连续失败、熔断剩余秒数
+func (n *Node) Stats() (requests, failTotal uint64, consecutive int, cooldownSec int) {
+	requests = atomic.LoadUint64(&n.Requests)
+	failTotal = atomic.LoadUint64(&n.FailTotal)
+	n.mu.RLock()
+	consecutive = n.FailureCount
+	if n.FailureCount >= 5 && !n.LastFailTime.IsZero() {
+		if remain := 2*time.Minute - time.Since(n.LastFailTime); remain > 0 {
+			cooldownSec = int(remain.Seconds())
+		}
+	}
+	n.mu.RUnlock()
+	return
+}
+
 type Provider struct {
 	Nodes        []*Node
 	CurrentIndex int
@@ -83,7 +103,7 @@ type Provider struct {
 func NewProvider(functionURLs []string, token string) *Provider {
 	nodes := make([]*Node, len(functionURLs))
 	for i, url := range functionURLs {
-		nodes[i] = &Node{URL: url}
+		nodes[i] = &Node{URL: url, Name: fmt.Sprintf("节点%d", i+1)}
 	}
 	return &Provider{
 		Nodes:        nodes,
@@ -157,15 +177,28 @@ func (p *Provider) HealthCheck() (string, error) {
 
 // Invoke 调用云函数执行请求 (自动选择节点)
 func (p *Provider) Invoke(payload FunctionRequest) (*FunctionResponse, error) {
+	resp, _, err := p.InvokeDetailed(payload)
+	return resp, err
+}
+
+// InvokeDetailed 调用云函数并返回实际使用的节点 (供监控面板归因)
+func (p *Provider) InvokeDetailed(payload FunctionRequest) (*FunctionResponse, *Node, error) {
 	node := p.getNextNode()
 	if node == nil {
-		return nil, fmt.Errorf("未配置云函数 URL")
+		return nil, nil, fmt.Errorf("未配置云函数 URL")
 	}
-	return p.invokeNode(node, payload)
+	atomic.AddUint64(&node.Requests, 1)
+	resp, err := p.invokeNodeResult(node, payload)
+	return resp, node, err
 }
 
 // invokeNode 执行具体的节点调用并处理熔断计数
 func (p *Provider) invokeNode(node *Node, payload FunctionRequest) (*FunctionResponse, error) {
+	atomic.AddUint64(&node.Requests, 1)
+	return p.invokeNodeResult(node, payload)
+}
+
+func (p *Provider) invokeNodeResult(node *Node, payload FunctionRequest) (*FunctionResponse, error) {
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err

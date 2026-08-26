@@ -37,6 +37,11 @@ type ProxyServer struct {
 	Quiet     bool // 静默模式: 关闭逐请求日志，只输出错误和周期统计
 	dumpMu    sync.Mutex
 
+	// 最近请求流水 (环形缓冲, 供监控面板展示)
+	StartedAt time.Time
+	recent    []dashboard.RequestRecord
+	recentMu  sync.Mutex
+
 	// Stats (Atomic)
 	TotalRequests   uint64
 	SuccessRequests uint64
@@ -45,10 +50,22 @@ type ProxyServer struct {
 
 // GetStats implements dashboard.StatsReporter
 func (s *ProxyServer) GetStats() dashboard.ProxyStats {
+	s.recentMu.Lock()
+	recent := make([]dashboard.RequestRecord, len(s.recent))
+	copy(recent, s.recent)
+	s.recentMu.Unlock()
+
+	// 倒序排列，最新在前
+	for i, j := 0, len(recent)-1; i < j; i, j = i+1, j-1 {
+		recent[i], recent[j] = recent[j], recent[i]
+	}
+
 	return dashboard.ProxyStats{
 		TotalRequests:   atomic.LoadUint64(&s.TotalRequests),
 		SuccessRequests: atomic.LoadUint64(&s.SuccessRequests),
 		FailedRequests:  atomic.LoadUint64(&s.FailedRequests),
+		StartedAt:       s.StartedAt,
+		Recent:          recent,
 		Nodes:           s.Provider.Nodes,
 	}
 }
@@ -67,6 +84,19 @@ func NewProxyServer(addr, socksAddr, user, password string, dump bool, dumpFile 
 		Provider:  provider,
 		Verbose:   verbose,
 		Quiet:     quiet,
+		StartedAt: time.Now(),
+	}
+}
+
+const maxRecentRecords = 200
+
+// pushRecent 记录一条请求流水 (环形缓冲, 超长丢弃最旧的)
+func (s *ProxyServer) pushRecent(rec dashboard.RequestRecord) {
+	s.recentMu.Lock()
+	defer s.recentMu.Unlock()
+	s.recent = append(s.recent, rec)
+	if len(s.recent) > maxRecentRecords {
+		s.recent = s.recent[len(s.recent)-maxRecentRecords:]
 	}
 }
 
@@ -320,13 +350,29 @@ func (s *ProxyServer) handleRequest(r *http.Request) *http.Response {
 		IsBodyBase64: isBase64,
 	}
 
-	// 核心调用
-	funcResp, err := s.Provider.Invoke(payload)
+	// 核心调用 (InvokeDetailed 返回实际使用的节点用于面板归因)
+	funcResp, node, err := s.Provider.InvokeDetailed(payload)
 	duration := time.Since(startTime)
+
+	nodeName := ""
+	if node != nil {
+		nodeName = node.Name
+	}
 
 	if err != nil {
 		// Stat: Failed ++
 		atomic.AddUint64(&s.FailedRequests, 1)
+
+		s.pushRecent(dashboard.RequestRecord{
+			Time:     startTime.Format("15:04:05"),
+			Method:   r.Method,
+			Host:     r.URL.Host,
+			Path:     r.URL.Path,
+			Status:   0,
+			Duration: duration.Milliseconds(),
+			Node:     nodeName,
+			Error:    err.Error(),
+		})
 
 		if !s.Quiet {
 			fmt.Printf("[%s] %s %s -> 错误 (%v)\n",
@@ -342,6 +388,16 @@ func (s *ProxyServer) handleRequest(r *http.Request) *http.Response {
 
 	// Stat: Success ++
 	atomic.AddUint64(&s.SuccessRequests, 1)
+
+	s.pushRecent(dashboard.RequestRecord{
+		Time:     startTime.Format("15:04:05"),
+		Method:   r.Method,
+		Host:     r.URL.Host,
+		Path:     r.URL.Path,
+		Status:   funcResp.StatusCode,
+		Duration: duration.Milliseconds(),
+		Node:     nodeName,
+	})
 
 	// 日志输出 (静默模式下跳过)
 	if !s.Quiet {
