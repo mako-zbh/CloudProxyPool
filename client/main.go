@@ -8,7 +8,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"strings"
 
 	"github.com/fatih/color"
 )
@@ -37,6 +39,9 @@ func main() {
 		color.Red("错误: 请在 %s 中设置有效的云函数 URL (function_urls)", configPath)
 		return
 	}
+
+	// 未启用认证却绑定非回环地址时给出安全警告
+	warnOpenBind(conf)
 
 	// 2. 初始化云函数提供者
 	provider := cloud.NewProvider(conf.Cloud.FunctionURLs, conf.Cloud.Token)
@@ -69,11 +74,41 @@ func main() {
 
 	// 6. 启动 Web Dashboard (如果配置)
 	if conf.Client.DashboardAddr != "" {
-		go dashboard.StartDashboard(conf.Client.DashboardAddr, srv)
+		go dashboard.StartDashboard(conf.Client.DashboardAddr, srv, conf.Client.User, conf.Client.Password)
 	}
 
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// loopbackOnly 判断监听地址是否只绑定回环地址
+func loopbackOnly(addr string) bool {
+	host := addr
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		host = strings.Trim(addr[:i], "[]")
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// warnOpenBind 在未启用认证却绑定非回环地址时给出警告
+func warnOpenBind(conf *config.Config) {
+	if conf.Client.User != "" {
+		return
+	}
+	for _, item := range []struct{ name, addr string }{
+		{"HTTP 代理", conf.Client.ListenAddr},
+		{"SOCKS5 代理", conf.Client.SocksAddr},
+		{"监控面板", conf.Client.DashboardAddr},
+	} {
+		if item.addr != "" && !loopbackOnly(item.addr) {
+			color.Yellow("[警告] %s 监听 %s (非回环地址) 且未启用认证，同网络下的设备均可直接访问！", item.name, item.addr)
+			color.Yellow("[提示] 在 [client] 中配置 user/password 可同时为 HTTP 代理、SOCKS5 和监控面板启用认证。")
+		}
 	}
 }
 

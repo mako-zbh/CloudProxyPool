@@ -256,6 +256,15 @@ func (s *ProxyServer) startSocks5Proxy() {
 		Logger: log.New(ioutil.Discard, "", 0),
 	}
 
+	// 启用 SOCKS5 用户名/密码认证 (与 HTTP 代理共用同一组账号)
+	if s.User != "" && s.Password != "" {
+		creds := socks5.StaticCredentials{s.User: s.Password}
+		conf.AuthMethods = []socks5.Authenticator{
+			socks5.UserPassAuthenticator{Credentials: creds},
+		}
+		log.Printf("SOCKS5 已启用用户名/密码认证 (User: %s)", s.User)
+	}
+
 	server, err := socks5.New(conf)
 	if err != nil {
 		log.Printf("[错误] SOCKS5 服务初始化失败: %v", err)

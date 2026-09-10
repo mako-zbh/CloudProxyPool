@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"cloud-proxy-pool/cloud"
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -37,15 +38,16 @@ type ProxyStats struct {
 // Global interface to access proxy stats
 var Reporter StatsReporter
 
-// StartDashboard starts the monitoring web server
-func StartDashboard(addr string, reporter StatsReporter) {
+// StartDashboard starts the monitoring web server.
+// 配置了 user/password 时，面板与 API 均需 Basic Auth 认证 (与代理共用同一组账号)
+func StartDashboard(addr string, reporter StatsReporter, user, password string) {
 	Reporter = reporter
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", withAuth(user, password, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(htmlContent))
-	})
+	}))
 
-	http.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/stats", withAuth(user, password, func(w http.ResponseWriter, r *http.Request) {
 		if Reporter == nil {
 			http.Error(w, "Stats not available", 503)
 			return
@@ -96,10 +98,28 @@ func StartDashboard(addr string, reporter StatsReporter) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
-	})
+	}))
 
 	log.Printf("监控面板正在监听: http://localhost%s", addr)
 	go http.ListenAndServe(addr, nil)
+}
+
+// withAuth 为面板处理器加 Basic Auth；账号未配置时直接放行
+func withAuth(user, password string, next http.HandlerFunc) http.HandlerFunc {
+	if user == "" || password == "" {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		okUser := subtle.ConstantTimeCompare([]byte(u), []byte(user)) == 1
+		okPass := subtle.ConstantTimeCompare([]byte(p), []byte(password)) == 1
+		if !ok || !okUser || !okPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Cloud ProxyPool Dashboard"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // Embedded real-time dashboard (polls /api/stats every second, computes QPS client-side)

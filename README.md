@@ -242,7 +242,7 @@ dump_file = "traffic.log"
 
 ## 🔐 HTTP Basic Auth
 
-编辑 `config.toml` 启用本地代理认证：
+编辑 `config.toml` 启用认证，**一组账号同时覆盖 HTTP 代理、SOCKS5 代理和监控面板**：
 
 ```toml
 [client]
@@ -250,11 +250,29 @@ user = "admin"
 password = "your_strong_password"
 ```
 
+- HTTP 代理：标准 Basic Auth（未认证返回 407）
+- SOCKS5：用户名/密码认证（RFC 1929，未认证拒绝连接）
+- 监控面板：页面和 `/api/stats` 均需 Basic Auth（未认证返回 401）
+
 客户端使用：
 
 ```bash
 curl -x http://admin:your_strong_password@127.0.0.1:10800 http://ipinfo.io
+curl -x socks5h://admin:your_strong_password@127.0.0.1:10801 http://ipinfo.io
 ```
+
+## 🌐 监听地址与绑定指定 IP
+
+三个监听地址都支持绑定到指定网卡 IP（默认仅本机回环）：
+
+```toml
+[client]
+listen_addr    = "127.0.0.1:10800"  # HTTP 代理；改 "192.168.1.5:10800" 绑定局域网 IP，"0.0.0.0:10800" 全网卡
+socks_addr     = ":10801"           # SOCKS5；":端口" 表示全网卡
+dashboard_addr = ":8081"            # 监控面板
+```
+
+> 客户端在**未启用认证却绑定非回环地址**时会打印安全警告——局域网场景请务必配置 user/password。
 
 ---
 
