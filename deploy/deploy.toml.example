@@ -20,6 +20,15 @@ auth_token = ""
 # SSRF 防护: true 拒绝内网/保留地址; false 放行 (漏洞探测场景建议 false, 云元数据始终拦截)
 ssrf_protection = true
 
+[client]
+# 客户端监听与认证 (重部署时写入 client/config.toml，避免被重置)
+# 绑定 0.0.0.0/局域网 IP 并配认证后可给同网络设备使用
+listen_addr = "127.0.0.1:10800"
+socks_addr = ":10801"
+dashboard_addr = ":8081"
+# user = "admin"
+# password = "strong_password"
+
 [health_check]
 # 是否部署后立即进行健康检查
 enable = true

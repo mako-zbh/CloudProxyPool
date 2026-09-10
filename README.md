@@ -273,6 +273,7 @@ dashboard_addr = ":8081"            # 监控面板
 ```
 
 > 客户端在**未启用认证却绑定非回环地址**时会打印安全警告——局域网场景请务必配置 user/password。
+> 监听地址与认证也可写在 `deploy.toml` 的 `[client]` 段，重新部署时会写入生成的 `client/config.toml`，不会被重置。
 
 ---
 

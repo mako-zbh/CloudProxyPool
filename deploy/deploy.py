@@ -351,20 +351,33 @@ def check_health(url, conf, token):
         
     return False
 
-def generate_client_config(urls, token):
-    """生成客户端配置文件"""
+def generate_client_config(urls, token, conf):
+    """生成客户端配置文件。
+
+    deploy.toml 中的 [client] 段 (listen_addr/socks_addr/dashboard_addr/user/password)
+    会写入生成的配置，避免重新部署后监听地址与认证配置被重置回默认值。
+    """
+    cc = conf.get('client', {})
+    listen_addr = cc.get('listen_addr', '127.0.0.1:10800')
+    socks_addr = cc.get('socks_addr', ':10801')
+    dashboard_addr = cc.get('dashboard_addr', ':8081')
+    user = cc.get('user', '')
+    password = cc.get('password', '')
+
+    if user and password:
+        auth_lines = f'user = "{user}"\npassword = "{password}"'
+    else:
+        auth_lines = '# user = "admin"\n# password = "your_password"'
+
     config_content = f"""[client]
-listen_addr = "127.0.0.1:10800"
-socks_addr = ":10801"
-dashboard_addr = ":8081"
+listen_addr = "{listen_addr}"
+socks_addr = "{socks_addr}"
+dashboard_addr = "{dashboard_addr}"
 dump = false
 debug = false
 # 静默模式: 关闭逐请求日志，只输出错误和每分钟统计 (高并发扫描建议开启)
 quiet = true
-
-# 可选配置 (取消注释以启用):
-# user = "admin"
-# password = "your_password"
+{auth_lines}
 # dump_file = "traffic.log"
 
 [cloud]
@@ -527,7 +540,7 @@ def main():
         os.remove(zip_path)
 
     if success_urls:
-        generate_client_config(success_urls, token)
+        generate_client_config(success_urls, token, conf)
         print("\n=== 部署完成! ===")
         print("您可以直接运行客户端开始使用: ./cloud-proxy.exe -C config.toml")
     else:
